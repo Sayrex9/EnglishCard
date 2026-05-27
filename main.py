@@ -10,6 +10,14 @@ st.set_page_config(
 )
 
 
+def logout():
+    """Функция выхода пользователя — очищает сессию."""
+    if 'user_id' in st.session_state:
+        st.session_state.pop('user_id')
+    if 'username' in st.session_state:
+        st.session_state.pop('username')
+
+
 # ========= Работа с базой данных =========
 def get_db_connection():
     """Подключение к PostgreSQL."""
@@ -17,7 +25,7 @@ def get_db_connection():
         host="localhost",
         database="english_card",
         user="postgres",
-        password="postgres",
+        password="fQdd45LuV@Cs",
         client_encoding="UTF8"
     )
 
@@ -243,8 +251,11 @@ def render_sidebar():
                 st.sidebar.error("Введите имя!")
 
 
-def render_study_tab(words):
+def render_study_tab():
     """Вкладка изучения слов (Викторина)."""
+    # Получаем 4 случайных слова напрямую из БД
+    words = get_random_user_words(st.session_state.user_id, limit=4)
+
     if not words:
         st.info("Добавьте слова во вкладке ➕.")
         return
@@ -254,15 +265,27 @@ def render_study_tab(words):
     options = generate_options(current_word['english_word'], all_english)
 
     st.write(f"**Переведите:** {current_word['russian_word']}")
-
-    selected_answer = st.radio("Выберите правильный перевод:", options,
-                               key="quiz_answer")
+    selected_answer = st.radio(
+        "Выберите правильный перевод:", options, key="quiz_answer")
 
     if st.button("Проверить ответ", key="check_answer"):
         is_correct = selected_answer.lower() == current_word[
-            'english_word'
-            ].lower()
-        handle_answer(is_correct, current_word)
+            'english_word'].lower()
+        # Сохраняем результат в сессию
+        if is_correct:
+            st.session_state.answer_message = f"✅ Верно! Ответ: {
+                current_word['english_word']}"
+        else:
+            st.session_state.answer_message = f"❌ Неправильно. Ответ: {
+                current_word['english_word']}"
+        update_stats(st.session_state.user_id, current_word['id'],
+                     current_word['word_type'], is_correct)
+        st.rerun()
+
+    # Показываем сообщение после перезагрузки
+    if "answer_message" in st.session_state:
+        message = st.session_state.pop("answer_message")
+        st.success(message) if "✅" in message else st.error(message)
 
 
 def handle_answer(is_correct, word):
@@ -277,24 +300,42 @@ def handle_answer(is_correct, word):
 
 def render_add_tab():
     """Вкладка добавления слов."""
-    russian = st.text_input("Слово на русском")
-    english = st.text_input("Перевод на английском")
+    with st.form("add_word_form"):
+        russian = st.text_input("Слово на русском")
+        english = st.text_input("Перевод на английском")
+        submitted = st.form_submit_button("➕ Добавить")
 
-    if st.button("➕ Добавить"):
-        if not russian or not english:
-            st.warning("Заполните оба поля!")
-            return
-        success = add_personal_word(st.session_state.user_id, russian, english)
-        if success:
-            st.success("✅ Слово добавлено!")
-        else:
-            st.error("❌ Уже есть такое слово.")
-        st.rerun()
+        if submitted:
+            if not russian or not english:
+                st.warning("Заполните оба поля!")
+            else:
+                success = add_personal_word(
+                    st.session_state.user_id, russian, english)
+                if success:
+                    st.session_state.add_message = "✅ Слово добавлено!"
+                else:
+                    st.session_state.add_message = "❌ Уже есть такое слово."
+                st.rerun()
+
+    if "add_message" in st.session_state:
+        message = st.session_state.pop("add_message")
+        st.success(message) if "✅" in message else st.error(message)
 
 
-def render_delete_tab(words):
+def render_delete_tab():
     """Вкладка удаления слов."""
-    personal_words = [w for w in words if w['word_type'] == 'user']
+    # Получаем персональные слова напрямую из БД
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, russian_word, "
+        "english_word FROM user_words WHERE user_id = %s",
+        (st.session_state.user_id,))
+    personal_words = [{'id': row[0], 'russian_word': row[1],
+                       'english_word': row[2]}
+                      for row in cur.fetchall()]
+    conn.close()
+
     if not personal_words:
         st.info("Нет ваших слов для удаления.")
         return
@@ -310,10 +351,15 @@ def render_delete_tab(words):
         success = delete_personal_word(st.session_state.user_id,
                                        selected_word['id'])
         if success:
-            st.success("✅ Удалено!")
+            st.session_state.delete_message = "✅ Удалено!"
         else:
-            st.error("❌ Ошибка удаления.")
+            st.session_state.delete_message = "❌ Ошибка удаления."
         st.rerun()
+
+    # Показываем сообщение после перезагрузки
+    if "delete_message" in st.session_state:
+        message = st.session_state.pop("delete_message")
+        st.success(message) if "✅" in message else st.error(message)
 
 
 def render_stats_tab(user_id):
@@ -368,33 +414,44 @@ CREATE TABLE learning_stats (
 """, language="sql")
 
 
+def get_random_user_words(user_id, limit=4):
+    """Получение случайных слов пользователя."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, russian_word, english_word, word_type
+        FROM (
+            SELECT id, russian_word, english_word, 'common' AS word_type
+            FROM common_words
+            UNION ALL
+            SELECT id, russian_word, english_word, 'user' AS word_type
+            FROM user_words WHERE user_id = %s
+        ) AS combined_words
+        ORDER BY RANDOM()
+        LIMIT %s
+    """, (user_id, limit))
+    words = [{'id': w[0], 'russian_word': w[1], 'english_word': w[2],
+              'word_type': w[3]} for w in cur.fetchall()]
+    conn.close()
+    return words
+
+
+
 # ========= Главная функция приложения =========
 def main():
     st.title("📚 EnglishCard — учи английский!")
-
-    # Инициализация БД
     init_database()
-
-    # Боковая панель
     render_sidebar()
 
-    # Контент в зависимости от авторизации
     if 'user_id' in st.session_state:
-        words = get_user_words(st.session_state.user_id)
-
         tabs = st.tabs(
             ["📖 Учить", "➕ Добавить", "🗑️ Удалить", "📊 Статистика", "📄 Схема"])
-
-        with tabs[0]: render_study_tab(words)
+        with tabs[0]: render_study_tab()
         with tabs[1]: render_add_tab()
-        with tabs[2]: render_delete_tab(words)
+        with tabs[2]: render_delete_tab()
         with tabs[3]: render_stats_tab(st.session_state.user_id)
         with tabs[4]: render_schema_tab()
-
-        st.sidebar.button(
-            "🚪 Выход", key="logout", on_click=lambda:
-            st.session_state.pop('user_id'))
-
+        st.sidebar.button("🚪 Выход", key="logout", on_click=logout)
     else:
         render_welcome()
 
